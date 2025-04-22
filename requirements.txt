@@ -170,7 +170,6 @@ Pygments==2.19.1
 PyJWT==2.10.1
 pyodbc==5.2.0
 pyparsing==3.2.1
-PyPDF2==3.0.1
 pywin32==308
 pywinpty==2.0.15
 PyYAML==6.0.2
