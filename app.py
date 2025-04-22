@@ -18,25 +18,41 @@ def format_date(date_str):
             if "'" in date_str:  # Format like "19 Jul '25"
                 parts = date_str.split()
                 if len(parts) >= 2:
-                    return f"{parts[0]}-{parts[1]}"
+                    # Attempt to parse and reformat to ensure consistency, though original might be fine
+                    try:
+                         # Adding year handling for robust parsing
+                        year_part = parts[2].replace("'", "")
+                        # Simple assumption for 2-digit year: add 2000. Adjust if needed for years before 2000.
+                        full_year = 2000 + int(year_part)
+                        date_obj = datetime.strptime(f"{parts[0]} {parts[1]} {full_year}", "%d %b %Y")
+                        return date_obj.strftime("%d-%b")
+                    except:
+                        return f"{parts[0]}-{parts[1]}" # Fallback to original if parsing fails
             elif "00:00:00" in date_str:  # Format like "2025-07-19 00:00:00"
                 date_part = date_str.split()[0]
                 if "-" in date_part:
-                    year, month, day = date_part.split('-')
-                    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", 
-                                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-                    return f"{int(day)}-{month_names[int(month)-1]}"
+                    try:
+                        date_obj = datetime.strptime(date_part, "%Y-%m-%d")
+                        return date_obj.strftime("%d-%b")
+                    except:
+                        # Fallback if parsing fails
+                        year, month, day = date_part.split('-')
+                        month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                        return f"{int(day)}-{month_names[int(month)-1]}"
         elif isinstance(date_str, datetime):
             return f"{date_str.day}-{date_str.strftime('%b')}"
     except Exception as e:
+        # st.warning(f"Could not format date '{date_str}': {e}") # Optional: for debugging
         pass
     return ""
+
 
 def extract_multi_lot_data(df):
     """Extract data for multiple lots from the booking form"""
     base_data = {}
     lot_data = []
-    
+
     # Extract basic information that applies to all lots
     base_mappings = {
         'Description': (20, 3),       # Row 20, Column 3
@@ -48,7 +64,7 @@ def extract_multi_lot_data(df):
         'VCP': (28, 3),               # Row 28, Column 3
         'Factory': (14, 3),           # Row 14, Column 3 (Factory Name)
     }
-    
+
     # Extract base data
     for field, (row, col) in base_mappings.items():
         if row < df.shape[0] and col < df.shape[1]:
@@ -58,7 +74,7 @@ def extract_multi_lot_data(df):
                     base_data[field] = str(int(cell_value)) if cell_value.is_integer() else str(cell_value)
                 else:
                     base_data[field] = str(cell_value).strip()
-    
+
     # Process factory name
     if 'Factory' in base_data:
         factory_value = base_data['Factory']
@@ -67,7 +83,7 @@ def extract_multi_lot_data(df):
             if len(parts) >= 2:
                 base_data['Factory'] = parts[0].strip()
                 base_data['Factory ID'] = parts[1].replace(']', '').strip()
-    
+
     # Process color
     if 'Color' in base_data:
         color_value = base_data['Color']
@@ -76,29 +92,28 @@ def extract_multi_lot_data(df):
             color_code = re.search(r'\[(.*?)\]', color_value)
             if color_code:
                 base_data['Color Code'] = color_code.group(1)
-    
+
     # Find the ship and warehouse date rows
     ship_row = None
     whs_row = None
-    for i in range(15, 25):  # Look around rows 20-21 where these often appear
-        if i < df.shape[0]:
-            for j in range(7, 8):  # Look in column 7 for the labels
-                if j < df.shape[1]:
-                    cell_value = str(df.iloc[i, j]).strip() if pd.notna(df.iloc[i, j]) else ""
-                    if 'Ship' in cell_value:
-                        ship_row = i
-                    elif 'Whs' in cell_value:
-                        whs_row = i
-    
+    # Look around rows 15-25 where these often appear and in column 7 for the labels
+    for i in range(15, 25):
+        if i < df.shape[0] and 7 < df.shape[1]:
+            cell_value = str(df.iloc[i, 7]).strip() if pd.notna(df.iloc[i, 7]) else ""
+            if 'Ship' in cell_value:
+                ship_row = i
+            elif 'Whs' in cell_value:
+                whs_row = i
+
     # Find the units row
     units_row = None
-    for i in range(18, 25):
-        if i < df.shape[0]:
+    for i in range(18, 25): # Look around rows 18-25
+        if i < df.shape[0] and 7 < df.shape[1]:
             cell_value = str(df.iloc[i, 7]).strip() if pd.notna(df.iloc[i, 7]) else ""
             if 'Units' in cell_value:
                 units_row = i
                 break
-    
+
     # Determine how many lots are in the form by checking for non-empty units
     if units_row is not None:
         lot_count = 0
@@ -107,72 +122,94 @@ def extract_multi_lot_data(df):
                 units_value = df.iloc[units_row, col]
                 if pd.notna(units_value) and units_value != 0:
                     lot_count += 1
-                    
+
                     # Create a lot entry
                     lot_entry = dict(base_data)  # Copy base data
-                    
+
                     # Add lot-specific data
                     lot_entry['Lot Number'] = lot_count
-                    lot_entry['Units'] = str(int(units_value)) if isinstance(units_value, (int, float)) else str(units_value).strip()
-                    
-                    # Add ship date if available
+                    lot_entry['Units'] = str(int(units_value)) if isinstance(units_value, (int, float)) and not pd.isna(units_value) else str(units_value).strip()
+
+
+                    # Add ship date if available and calculate Ex FTY
+                    lot_entry['Ship Date'] = ''
+                    lot_entry['Ship Date Formatted'] = ''
+                    lot_entry['Ex FTY'] = '' # Initialize Ex FTY
+
                     if ship_row is not None and col < df.shape[1]:
                         ship_date = df.iloc[ship_row, col]
                         if pd.notna(ship_date):
                             lot_entry['Ship Date'] = str(ship_date)
-                            lot_entry['Ship Date Formatted'] = format_date(ship_date)
-                            
+                            ship_date_formatted = format_date(ship_date)
+                            lot_entry['Ship Date Formatted'] = ship_date_formatted
+
                             # Calculate Ex FTY date (12 days before Ship Date)
                             try:
-                                date_str = str(ship_date)
-                                if ' ' in date_str and "00:00:00" in date_str:  # Format like "2025-07-19 00:00:00"
-                                    date_parts = date_str.split(' ')[0].split('-')
-                                    if len(date_parts) == 3:
-                                        year, month, day = date_parts
-                                        ship_datetime = datetime(int(year), int(month), int(day))
-                                        ex_fty_date = ship_datetime - timedelta(days=12)
-                                        lot_entry['Ex FTY'] = f"{ex_fty_date.day}-{ex_fty_date.strftime('%b')}"
-                                elif "'" in date_str:  # Format like "19 Jul '25"
-                                    date_parts = date_str.split()
-                                    if len(date_parts) >= 3:
-                                        day = int(date_parts[0])
-                                        month_str = date_parts[1]
-                                        year_str = date_parts[2].replace("'", "20")
-                                        month_map = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6, 
-                                                    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
-                                        month = month_map.get(month_str, 1)
-                                        year = int(year_str)
-                                        ship_datetime = datetime(year, month, day)
-                                        ex_fty_date = ship_datetime - timedelta(days=12)
-                                        lot_entry['Ex FTY'] = f"{ex_fty_date.day}-{ex_fty_date.strftime('%b')}"
+                                # Try parsing the date in various expected formats
+                                ship_datetime = None
+                                if isinstance(ship_date, datetime):
+                                     ship_datetime = ship_date
+                                elif isinstance(ship_date, str):
+                                    date_str = str(ship_date)
+                                    if ' ' in date_str and "00:00:00" in date_str: # Format like "2025-07-19 00:00:00"
+                                        date_parts = date_str.split(' ')[0].split('-')
+                                        if len(date_parts) == 3:
+                                            year, month, day = map(int, date_parts)
+                                            ship_datetime = datetime(year, month, day)
+                                    elif "'" in date_str: # Format like "19 Jul '25"
+                                         date_parts = date_str.split()
+                                         if len(date_parts) >= 3:
+                                            day = int(date_parts[0])
+                                            month_str = date_parts[1]
+                                            year_str = date_parts[2].replace("'", "20") # Assume '25 is 2025 etc.
+                                            month_map = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+                                                         "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+                                            month = month_map.get(month_str)
+                                            year = int(year_str)
+                                            if month is not None:
+                                                ship_datetime = datetime(year, month, day)
+
+                                if ship_datetime:
+                                    ex_fty_date = ship_datetime - timedelta(days=12)
+                                    lot_entry['Ex FTY'] = ex_fty_date.strftime("%d-%b")
+                                else:
+                                     # If ship_date_formatted was successfully created but datetime parsing failed
+                                     # We might not be able to calculate Ex FTY accurately.
+                                     pass # Leave Ex FTY as empty string
+
                             except Exception as e:
+                                # st.warning(f"Could not calculate Ex FTY for ship date '{ship_date}': {e}") # Optional: for debugging
                                 pass
-                    
+
+
                     # Add warehouse date if available
+                    lot_entry['Warehouse Date'] = ''
+                    lot_entry['Warehouse Date Formatted'] = ''
                     if whs_row is not None and col < df.shape[1]:
                         whs_date = df.iloc[whs_row, col]
                         if pd.notna(whs_date):
                             lot_entry['Warehouse Date'] = str(whs_date)
                             lot_entry['Warehouse Date Formatted'] = format_date(whs_date)
-                    
+
                     lot_data.append(lot_entry)
-    
+
     return base_data, lot_data
+
 
 def create_order_details_output(base_data, lot_data):
     """Create order details output sheet with one row per lot"""
-    
+
     # Set up empty dataframe with column headers only
     order_details_cols = [
         'IMAGE', 'SUPPLIER REFERENCE', 'DESCRIPTION', 'COLOUR', 'UNITS',
-        'BOOKING FORM DELIVERY', 'CONFIRMED DELIVERY', 'VCP', 'FACTORY',
+        'BOOKING FORM DELIVERY', 'Ex FTY', 'CONFIRMED DELIVERY', 'VCP', 'FACTORY', # Added 'Ex FTY' here
         'FABRIC COMP', 'SUSTAINABLE MESSAGE', 'COST', 'REMARKS'
     ]
-    
+
     if not lot_data:
         # Return empty dataframe with headers only
         return pd.DataFrame(columns=order_details_cols)
-    
+
     # Create Sheet 1 - one row per lot
     order_rows = []
     for lot in lot_data:
@@ -183,6 +220,7 @@ def create_order_details_output(base_data, lot_data):
             'COLOUR': lot.get('Color', 'TBC'),
             'UNITS': lot.get('Units', ''),
             'BOOKING FORM DELIVERY': lot.get('Ship Date Formatted', ''),
+            'Ex FTY': lot.get('Ex FTY', ''), # Populate Ex FTY from extracted data
             'CONFIRMED DELIVERY': lot.get('Ship Date Formatted', ''),  # Same as booking form delivery
             'VCP': lot.get('VCP', ''),
             'FACTORY': lot.get('Factory', '') + " - " + lot.get('Factory ID', '') if lot.get('Factory ID', '') else lot.get('Factory', ''),
@@ -192,26 +230,29 @@ def create_order_details_output(base_data, lot_data):
             'REMARKS': ''
         }
         order_rows.append(row)
-    
-    return pd.DataFrame(order_rows)
+
+    # Ensure columns order matches definition
+    return pd.DataFrame(order_rows, columns=order_details_cols)
+
 
 def allow_manual_edits(order_df):
     """Allow users to manually edit the generated data before final output"""
     st.markdown("### Edit Order Details")
     st.write("Make any needed changes to the data before generating the final Excel file.")
-    
+
     edited_order = st.data_editor(
         order_df,
         num_rows="fixed",
         use_container_width=True,
         hide_index=True
     )
-    
+
     return edited_order
+
 
 def main():
     st.set_page_config(page_title="Booking Form Processor", layout="wide")
-    
+
     st.markdown("""
         <style>
             .main-title { font-size: 40px; color: #4F8BF9; text-align: center; margin-bottom: 20px; }
@@ -247,85 +288,91 @@ def main():
     """, unsafe_allow_html=True)
 
     st.markdown('<h1 class="main-title">Booking Form Processor</h1>', unsafe_allow_html=True)
-    
+
+    # Add the warning message here
+    st.warning("⚠ Warning: This application can make mistakes. Do not rely solely on it. Its purpose is to make your job easier, but always double-check and validate before saving your tasks.")
+
     st.write("Upload an Excel booking form and generate order details with one line per lot.")
-    
+
     # Use the specific date and time provided by the user
     current_time = "2025-04-05 05:00:44"
     current_user = "dilshan-jolanka"
-    
+
     st.sidebar.markdown("### System Information")
     st.sidebar.write(f"**Date & Time (UTC):** {current_time}")
     st.sidebar.write(f"**Current User:** {current_user}")
 
     uploaded_excel = st.file_uploader("Upload Excel booking form", type=["xlsx", "xls"])
-    
+
     if uploaded_excel:
         st.success(f"File uploaded: {uploaded_excel.name}")
-        
+
         try:
             # Choose the appropriate engine based on file extension
             file_extension = uploaded_excel.name.split('.')[-1].lower()
-            
+
             if file_extension == 'xls':
                 engine = 'xlrd'
             else:  # xlsx or other formats
                 engine = 'openpyxl'
-                
+
             # Read Excel file - using the appropriate engine
             df = pd.read_excel(uploaded_excel, header=None, engine=engine)
-            
+
             # Extract data for multiple lots
             base_data, lot_data = extract_multi_lot_data(df)
-            
+
             if lot_data:
                 st.markdown('<div class="info-message">', unsafe_allow_html=True)
                 st.write(f"✅ Successfully extracted {len(lot_data)} lots from the booking form.")
                 st.markdown('</div>', unsafe_allow_html=True)
-                
-                # Display lot information
-                st.markdown("### Extracted Lot Data")
-                
+
+                # Display lot information (Optional, but good for verification)
+                st.markdown("### Extracted Lot Data Summary")
                 for i, lot in enumerate(lot_data, 1):
-                    col1, col2 = st.columns(2)
-                    with col1:
+                     col1, col2, col3 = st.columns(3)
+                     with col1:
                         st.write(f"**Lot {i}:**")
                         st.write(f"Units: {lot.get('Units', 'N/A')}")
-                        st.write(f"Ship Date: {lot.get('Ship Date Formatted', 'N/A')}")
-                    with col2:
-                        st.write(f"Reference: {lot.get('Reference', 'N/A')}")
-                        st.write(f"Warehouse Date: {lot.get('Warehouse Date Formatted', 'N/A')}")
-                        st.write(f"Ex FTY: {lot.get('Ex FTY', 'N/A')}")
-                
+                     with col2:
+                         st.write(f"Ship Date: {lot.get('Ship Date Formatted', 'N/A')}")
+                         st.write(f"Ex FTY: {lot.get('Ex FTY', 'N/A')}") # Display Ex FTY here too
+                     with col3:
+                         st.write(f"Reference: {lot.get('Reference', 'N/A')}")
+                         st.write(f"Warehouse Date: {lot.get('Warehouse Date Formatted', 'N/A')}")
+
+
                 # Generate output sheet (one row per lot)
                 order_df = create_order_details_output(base_data, lot_data)
-                
+
                 # Allow manual editing
                 edited_order = allow_manual_edits(order_df)
-                
+
                 # Create Excel output
                 if st.button("Generate Order Processing Sheet", type="primary"):
                     output = BytesIO()
                     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                         edited_order.to_excel(writer, sheet_name='Order Details', index=False)
-                        
+
                         # Add formatting
                         workbook = writer.book
                         header_format = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2', 'border': 1})
-                        
+
                         # Format the worksheet
                         worksheet = writer.sheets['Order Details']
                         for col_num, value in enumerate(edited_order.columns):
                             worksheet.write(0, col_num, value, header_format)
-                            worksheet.set_column(col_num, col_num, max(12, len(value) + 2))
-                    
+                            # Adjust column width based on header length, with a minimum
+                            worksheet.set_column(col_num, col_num, max(12, len(str(value)) + 2))
+
+
                     output.seek(0)
-                    
+
                     st.markdown('<div class="success-message">', unsafe_allow_html=True)
                     st.markdown("✅ **Order processing sheet has been generated successfully!**")
                     st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    ref = base_data.get('Reference', 'form').upper()
+
+                    ref = base_data.get('Reference', 'form').replace('/', '_').replace('\\', '_').upper() # Sanitize filename
                     st.download_button(
                         label="Download Order Processing Excel",
                         data=output,
@@ -335,27 +382,30 @@ def main():
                     )
             else:
                 st.warning("No lot information could be extracted from the booking form.")
-                
+
         except Exception as e:
             st.error(f"Error processing Excel file: {str(e)}")
             import traceback
             st.error(traceback.format_exc())
-            
+
             # Add helpful troubleshooting information
             st.markdown("""
             ### Troubleshooting Excel File Issues
-            
+
             If you're having trouble with your Excel file, try these steps:
-            
+
             1. Ensure you have both libraries installed:
                ```
                pip install xlrd>=2.0.1 openpyxl
                ```
-            
-            2. Make sure your Excel file is properly formatted
-            
-            3. Try saving your Excel file in a different format (.xls if you have .xlsx or vice versa)
+
+            2. Make sure your Excel file is properly formatted and the relevant data (Units, Ship Date) is in the expected rows and columns (around row 15-28, columns 9-16 for lots).
+
+            3. Try saving your Excel file in a different format (.xls if you have .xlsx or vice versa).
+
+            4. Check for merged cells or unusual formatting in the rows where units and dates are expected.
             """)
+
 
 if __name__ == "__main__":
     main()
